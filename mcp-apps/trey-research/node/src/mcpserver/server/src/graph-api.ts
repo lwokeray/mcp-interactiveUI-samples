@@ -156,10 +156,10 @@ export function resetGraphClient(): void {
   _credential = null;
 }
 
-async function graphGet<T = unknown>(url: string): Promise<T> {
+async function graphGet<T = unknown>(url: string, headers?: Record<string, string>): Promise<T> {
   const token = await getToken();
   const resp = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, ...headers },
   });
   if (!resp.ok) {
     const body = await resp.text();
@@ -207,14 +207,35 @@ function toHRUserSummary(u: User): HRUserSummary {
 
 /**
  * Search M365 users by a free-text query.
- * Matches against displayName, mail, userPrincipalName, jobTitle, department.
+ * Uses $search with "displayName:query" format (required by Graph API).
+ * Also falls back to $filter with startswith if $search fails.
  */
 export async function searchUsers(query: string): Promise<HRUserSummary[]> {
   const fields = USER_SELECT_FIELDS.join(",");
-  const response = await graphGet<{ value: User[] }>(
-    `/users?$select=${fields}&$top=25&$search="${encodeURIComponent(query)}"`,
-  );
-  return (response.value ?? []).map(toHRUserSummary);
+  const encoded = encodeURIComponent(query);
+
+  try {
+    // Try $search first (requires ConsistencyLevel=eventual)
+    const response = await graphGet<{ value: User[] }>(
+      `/users?$select=${fields}&$top=25&$search="displayName:${encoded}"`,
+      { ConsistencyLevel: "eventual" },
+    );
+    if (response.value && response.value.length > 0) {
+      return response.value.map(toHRUserSummary);
+    }
+  } catch {
+    // $search failed, fall through to $filter
+  }
+
+  // Fallback: use $filter with startswith on displayName
+  try {
+    const response = await graphGet<{ value: User[] }>(
+      `/users?$select=${fields}&$top=25&$filter=startswith(displayName,'${encoded}') or startswith(mail,'${encoded}') or startswith(userPrincipalName,'${encoded}')`,
+    );
+    return (response.value ?? []).map(toHRUserSummary);
+  } catch {
+    return [];
+  }
 }
 
 /**

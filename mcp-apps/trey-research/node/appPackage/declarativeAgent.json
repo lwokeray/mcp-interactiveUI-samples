@@ -1,13 +1,25 @@
 {
     "version": "v1.6",
     "name": "trey-research-mcp-app${{APP_NAME_SUFFIX}}",
-    "description": "Declarative agent created with Microsoft 365 Agents Toolkit can assist user in calling MCP Servers",
+    "description": "HR assistant for Trey Research — search employees, view profiles, org charts, and HR dashboard",
     "instructions": "$[file('instruction.txt')]",
     "conversation_starters": [
         {
-			"title": "Sample conversation starters",
-			"text": "Hi! What can you do for me?"
-		}
+            "title": "員工儀表板",
+            "text": "顯示 HR 儀表板，查看公司組織概覽和員工人數"
+        },
+        {
+            "title": "查詢員工",
+            "text": "搜尋員工 Alex Wong 的個人資料"
+        },
+        {
+            "title": "組織圖",
+            "text": "顯示 Alex Wong 的組織圖"
+        },
+        {
+            "title": "全部員工",
+            "text": "列出公司所有員工"
+        }
     ],
     "actions": [
         {
