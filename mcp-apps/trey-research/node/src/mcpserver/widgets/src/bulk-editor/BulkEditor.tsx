@@ -1,3 +1,4 @@
+/* eslint-disable react/no-inline-styles */
 import React, { useState, useCallback, useMemo, useEffect } from "react";
 import {
   Save20Regular,
@@ -376,6 +377,7 @@ export function BulkEditor() {
                     <input
                       style={{ ...inputStyle(t), width: 120, padding: "5px 10px", fontSize: 12 }}
                       placeholder="Add skill…"
+                      aria-label="New skill name"
                       value={newSkillInputs[row.id] ?? ""}
                       onChange={(e) => setNewSkillInputs((p) => ({ ...p, [row.id]: e.target.value }))}
                       onKeyDown={(e) => e.key === "Enter" && addTag(row.id, "skills")}
@@ -385,6 +387,7 @@ export function BulkEditor() {
                     <button
                       style={{ ...btnStyle(t, "ghost"), padding: "4px 8px", fontSize: 12, border: `1px solid ${t.divider}` }}
                       onClick={() => addTag(row.id, "skills")}
+                      title="Add skill"
                     >
                       <Add16Regular />
                     </button>
@@ -412,6 +415,7 @@ export function BulkEditor() {
                     <input
                       style={{ ...inputStyle(t), width: 120, padding: "5px 10px", fontSize: 12 }}
                       placeholder="Add role…"
+                      aria-label="New role name"
                       value={newRoleInputs[row.id] ?? ""}
                       onChange={(e) => setNewRoleInputs((p) => ({ ...p, [row.id]: e.target.value }))}
                       onKeyDown={(e) => e.key === "Enter" && addTag(row.id, "roles")}
@@ -421,6 +425,7 @@ export function BulkEditor() {
                     <button
                       style={{ ...btnStyle(t, "ghost"), padding: "4px 8px", fontSize: 12, border: `1px solid ${t.divider}` }}
                       onClick={() => addTag(row.id, "roles")}
+                      title="Add role"
                     >
                       <Add16Regular />
                     </button>

@@ -1,14 +1,14 @@
 /**
- * HR Consultant MCP Server – Express + Streamable HTTP transport.
+ * HR MCP Server – Express + Streamable HTTP transport.
  *
  * Stateless mode: each POST /mcp creates a fresh MCP server + transport.
+ * All data comes from Microsoft Graph API — no local storage needed.
  * Compatible with ChatGPT, Claude, Microsoft 365 Copilot, and other MCP clients.
  */
 import express from "express";
 import cors from "cors";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createHRServer } from "./mcp-server.js";
-import { ensureTables } from "./db.js";
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 const app = express();
 // ─── Origin allowlist ────────────────────────────────────────────────
@@ -233,26 +233,15 @@ app.delete("/mcp", async (req, res) => {
     }
 });
 // ─── Start ───────────────────────────────────────────────────────────
-async function main() {
-    // Ensure Azurite tables exist
-    try {
-        await ensureTables();
-        console.log("Azurite tables ready.");
+app.listen(PORT, () => {
+    const pub = getPublicServerUrl();
+    console.log(`\n  HR MCP Server (Graph API — no local storage)`);
+    console.log(`  Transport: Streamable HTTP (stateless)`);
+    console.log(`  Endpoint:  ${pub}/mcp`);
+    console.log(`  Health:    ${pub}/health`);
+    if (process.env.SERVER_BASE_URL) {
+        console.log(`  Public URL: ${pub}  (from SERVER_BASE_URL)`);
     }
-    catch (err) {
-        console.warn("Could not ensure Azurite tables (is Azurite running?):", err);
-    }
-    app.listen(PORT, () => {
-        const pub = getPublicServerUrl();
-        console.log(`\n  HR Consultant MCP Server`);
-        console.log(`  Transport: Streamable HTTP (stateless)`);
-        console.log(`  Endpoint:  ${pub}/mcp`);
-        console.log(`  Health:    ${pub}/health`);
-        if (process.env.SERVER_BASE_URL) {
-            console.log(`  Public URL: ${pub}  (from SERVER_BASE_URL)`);
-        }
-        console.log();
-    });
-}
-main().catch(console.error);
+    console.log();
+});
 //# sourceMappingURL=index.js.map

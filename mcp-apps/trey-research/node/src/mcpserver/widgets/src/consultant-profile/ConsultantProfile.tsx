@@ -1,3 +1,4 @@
+/* eslint-disable react/no-inline-styles */
 import React, { useState, useCallback, useEffect } from "react";
 import {
   Card,

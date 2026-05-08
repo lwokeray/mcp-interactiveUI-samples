@@ -2,15 +2,16 @@
   "name": "trey-hr-mcp-server",
   "version": "1.0.0",
   "type": "module",
-  "description": "HR Consultant MCP Server with Streamable HTTP transport",
+  "description": "HR MCP Server — Microsoft Graph API (no local storage)",
   "scripts": {
     "build": "tsc",
     "start": "node --env-file=../.env --import tsx src/index.ts",
-    "dev": "node --env-file=../.env --import tsx --watch src/index.ts",
-    "seed": "tsx src/seed.ts"
+    "dev": "node --env-file=../.env --import tsx --watch src/index.ts"
   },
   "dependencies": {
-    "@azure/data-tables": "^13.3.0",
+    "@azure/identity": "^4.13.1",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "@microsoft/microsoft-graph-types": "^2.43.1",
     "@modelcontextprotocol/ext-apps": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "cors": "^2.8.5",

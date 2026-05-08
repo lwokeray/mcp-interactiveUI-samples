@@ -1,3 +1,4 @@
+/* eslint-disable react/no-inline-styles */
 import React, { useState, useMemo, useEffect, useCallback } from "react";
 import {
   Table,
@@ -763,6 +764,7 @@ export function Dashboard() {
                 placeholder="Filter by name, skill, or location…"
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
+                aria-label="Filter consultants"
                 style={{
                   width: "100%", padding: "10px 12px 10px 34px", borderRadius: 8,
                   border: `1px solid ${t.divider}`, background: t.cardBg, color: t.textPrimary,
@@ -901,6 +903,7 @@ export function Dashboard() {
                 placeholder="Filter by project name, client, or consultant…"
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
+                aria-label="Filter projects"
                 style={{
                   width: "100%", padding: "10px 12px 10px 34px", borderRadius: 8,
                   border: `1px solid ${t.divider}`, background: t.cardBg, color: t.textPrimary,
@@ -1064,7 +1067,8 @@ export function Dashboard() {
                                       Assign Consultants to {p.name}
                                     </div>
                                     <button onClick={() => { setAssigningProject(null); setAssignMessage(null); }}
-                                      style={{ background: "none", border: "none", cursor: "pointer", color: t.textTertiary, padding: 4 }}>
+                                      style={{ background: "none", border: "none", cursor: "pointer", color: t.textTertiary, padding: 4 }}
+                                      title="Close">
                                       <Dismiss16Regular />
                                     </button>
                                   </div>
@@ -1073,6 +1077,7 @@ export function Dashboard() {
                                   <input
                                     type="text" placeholder="Search by name or skill…" value={assignSearch}
                                     onChange={(e) => setAssignSearch(e.target.value)}
+                                    aria-label="Search consultants"
                                     style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${t.divider}`, background: t.surface, color: t.textPrimary, fontSize: 13, fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box" }}
                                   />
 
@@ -1208,6 +1213,7 @@ export function Dashboard() {
                 placeholder="Search by consultant, project, or role…"
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
+                aria-label="Search assignments"
                 style={{
                   width: "100%", padding: "10px 12px 10px 34px", borderRadius: 8,
                   border: `1px solid ${t.divider}`, background: t.cardBg, color: t.textPrimary,

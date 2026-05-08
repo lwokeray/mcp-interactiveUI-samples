@@ -7,79 +7,51 @@
     "namespace": "treyresearchmcpapp",
     "functions": [
         {
-            "name": "assign-consultant-to-project",
-            "description": "Assign a single consultant to a project with a specified role, optional billing rate, and optional forecast hours. Both project and consultant can be identified by ID or name."
-        },
-        {
-            "name": "bulk-assign-consultants",
-            "description": "Assign multiple consultants to a project at once. Each assignment includes a role, optional billing rate, and optional forecast. Project and consultants can be identified by ID or name."
-        },
-        {
-            "name": "bulk-update-consultants",
-            "description": "Batch-update multiple consultant records at once. Consultants can be identified by ID or name."
-        },
-        {
-            "name": "remove-assignment",
-            "description": "Remove a consultant's assignment from a project. Both project and consultant can be identified by ID or name."
-        },
-        {
-            "name": "search-consultants",
-            "description": "Search consultants by skill or name. Returns matching consultants in the bulk editor widget for easy viewing and editing."
-        },
-        {
-            "name": "show-bulk-editor",
-            "description": "Open the bulk editor widget to view and edit consultant records. Accepts optional filters: skill, name — to show only matching consultants."
+            "name": "show-hr-dashboard",
+            "description": "Display the HR organization dashboard with KPIs including total employees, departments, and organization info."
         },
         {
             "name": "show-consultant-profile",
-            "description": "Display a detailed profile card for a specific consultant (by ID or name), including contact info, skills, certifications, roles, and current assignments."
+            "description": "Display a detailed profile for an employee (by ID, email, or name), including contact info, job details, skills, certifications, education, languages, work history, manager, direct reports, and groups."
         },
         {
-            "name": "show-hr-dashboard",
-            "description": "Display the HR consultant dashboard with KPIs. Accepts optional filters: consultantName, projectName, skill, role, billable — the dashboard auto-applies them so users see a focused view."
+            "name": "search-employees",
+            "description": "Search employees by name, email, job title, or department. Returns matching employees from the organization directory."
         },
         {
-            "name": "show-project-details",
-            "description": "Display detailed information about a specific project (by ID or name) including its assigned consultants and forecasted hours."
+            "name": "list-employees",
+            "description": "List all employees in the organization directory. Returns up to 200 employees with their profile information."
         },
         {
-            "name": "update-consultant",
-            "description": "Update a single consultant's information (name, email, phone, skills, roles). The consultant can be identified by ID or name."
+            "name": "show-org-chart",
+            "description": "Display the organization hierarchy for an employee, showing their manager, direct reports, and team structure."
         }
     ],
     "runtimes": [
         {
             "type": "RemoteMCPServer",
             "spec": {
-                "url": "https://t3n5kh44-3001.aue.devtunnels.ms/mcp",
+                "url": "https://tx12pggz-3001.jpe1.devtunnels.ms/mcp",
                 "x-mcp_tool_description": {
                     "tools": [
                         {
                             "name": "show-hr-dashboard",
                             "title": "Show HR Dashboard",
-                            "description": "Display the HR consultant dashboard with KPIs. Accepts optional filters: consultantName, projectName, skill, role, billable — the dashboard auto-applies them so users see a focused view.",
+                            "description": "Display the HR organization dashboard with KPIs including total employees, departments, and organization info. Accepts optional filters: department, name, jobTitle.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "consultantName": {
+                                    "department": {
                                         "type": "string",
-                                        "description": "Optional consultant name to pre-filter the dashboard (partial match, case-insensitive)."
+                                        "description": "Optional department name to pre-filter the dashboard (partial match, case-insensitive)."
                                     },
-                                    "projectName": {
+                                    "name": {
                                         "type": "string",
-                                        "description": "Optional project name to pre-filter the dashboard (partial match, case-insensitive)."
+                                        "description": "Optional employee name to pre-filter the dashboard (partial match, case-insensitive)."
                                     },
-                                    "skill": {
+                                    "jobTitle": {
                                         "type": "string",
-                                        "description": "Optional skill to pre-filter the dashboard — shows only consultants with this skill and their assignments."
-                                    },
-                                    "role": {
-                                        "type": "string",
-                                        "description": "Optional role to pre-filter assignments (e.g. 'Developer', 'Architect')."
-                                    },
-                                    "billable": {
-                                        "type": "boolean",
-                                        "description": "Optional — set true to show only billable assignments, false for non-billable."
+                                        "description": "Optional job title to pre-filter the dashboard (partial match, case-insensitive)."
                                     }
                                 },
                                 "additionalProperties": false,
@@ -100,18 +72,18 @@
                         },
                         {
                             "name": "show-consultant-profile",
-                            "title": "Show Consultant Profile",
-                            "description": "Display a detailed profile card for a specific consultant (by ID or name), including contact info, skills, certifications, roles, and current assignments.",
+                            "title": "Show Employee Profile",
+                            "description": "Display a detailed profile for an employee (by ID, email, or name), including contact info, job details, skills, certifications, education, languages, work history, manager, direct reports, and groups.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "consultantId": {
+                                    "employeeId": {
                                         "type": "string",
-                                        "description": "The ID or name (partial match, case-insensitive) of the consultant to view."
+                                        "description": "The employee ID, email, or display name (partial match, case-insensitive) to view."
                                     }
                                 },
                                 "required": [
-                                    "consultantId"
+                                    "employeeId"
                                 ],
                                 "additionalProperties": false,
                                 "$schema": "http://json-schema.org/draft-07/schema#"
@@ -130,21 +102,20 @@
                             }
                         },
                         {
-                            "name": "search-consultants",
-                            "title": "Search Consultants",
-                            "description": "Search consultants by skill or name. Returns matching consultants in the bulk editor widget for easy viewing and editing.",
+                            "name": "search-employees",
+                            "title": "Search Employees",
+                            "description": "Search employees by name, email, job title, or department. Returns matching employees from the organization directory.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "skill": {
+                                    "query": {
                                         "type": "string",
-                                        "description": "Skill to search for (partial match)."
-                                    },
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Name to search for (partial match)."
+                                        "description": "Search query to find employees (matches displayName, mail, userPrincipalName, jobTitle, department)."
                                     }
                                 },
+                                "required": [
+                                    "query"
+                                ],
                                 "additionalProperties": false,
                                 "$schema": "http://json-schema.org/draft-07/schema#"
                             },
@@ -162,26 +133,17 @@
                             }
                         },
                         {
-                            "name": "show-bulk-editor",
-                            "title": "Show Bulk Editor",
-                            "description": "Open the bulk editor widget to view and edit consultant records. Accepts optional filters: skill, name — to show only matching consultants.",
+                            "name": "list-employees",
+                            "title": "List All Employees",
+                            "description": "List all employees in the organization directory. Returns up to 200 employees with their profile information.",
                             "inputSchema": {
                                 "type": "object",
-                                "properties": {
-                                    "skill": {
-                                        "type": "string",
-                                        "description": "Optional skill to filter consultants (partial match, case-insensitive)."
-                                    },
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Optional name to filter consultants (partial match, case-insensitive)."
-                                    }
-                                },
+                                "properties": {},
                                 "additionalProperties": false,
                                 "$schema": "http://json-schema.org/draft-07/schema#"
                             },
                             "annotations": {
-                                "readOnlyHint": false
+                                "readOnlyHint": true
                             },
                             "execution": {
                                 "taskSupport": "forbidden"
@@ -194,19 +156,19 @@
                             }
                         },
                         {
-                            "name": "show-project-details",
-                            "title": "Show Project Details",
-                            "description": "Display detailed information about a specific project (by ID or name) including its assigned consultants and forecasted hours.",
+                            "name": "show-org-chart",
+                            "title": "Show Organization Chart",
+                            "description": "Display the organization hierarchy for an employee, showing their manager, direct reports, and team structure.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "projectId": {
+                                    "employeeId": {
                                         "type": "string",
-                                        "description": "The project ID or name (partial match, case-insensitive)."
+                                        "description": "The employee ID, email, or display name (partial match, case-insensitive) to view the org chart for."
                                     }
                                 },
                                 "required": [
-                                    "projectId"
+                                    "employeeId"
                                 ],
                                 "additionalProperties": false,
                                 "$schema": "http://json-schema.org/draft-07/schema#"
@@ -223,225 +185,16 @@
                                 },
                                 "ui/resourceUri": "ui://trey-hr/hr-dashboard.html"
                             }
-                        },
-                        {
-                            "name": "update-consultant",
-                            "description": "Update a single consultant's information (name, email, phone, skills, roles). The consultant can be identified by ID or name.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "consultantId": {
-                                        "type": "string",
-                                        "description": "The ID or name (partial match, case-insensitive) of the consultant to update."
-                                    },
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Updated name."
-                                    },
-                                    "email": {
-                                        "type": "string",
-                                        "description": "Updated email."
-                                    },
-                                    "phone": {
-                                        "type": "string",
-                                        "description": "Updated phone."
-                                    },
-                                    "skills": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "Updated skills list."
-                                    },
-                                    "roles": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "Updated roles list."
-                                    }
-                                },
-                                "required": [
-                                    "consultantId"
-                                ],
-                                "additionalProperties": false,
-                                "$schema": "http://json-schema.org/draft-07/schema#"
-                            },
-                            "execution": {
-                                "taskSupport": "forbidden"
-                            }
-                        },
-                        {
-                            "name": "bulk-update-consultants",
-                            "description": "Batch-update multiple consultant records at once. Consultants can be identified by ID or name.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "consultantIds": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "Array of consultant IDs or names (partial match, case-insensitive) to update."
-                                    },
-                                    "name": {
-                                        "type": "string",
-                                        "description": "New name for all."
-                                    },
-                                    "email": {
-                                        "type": "string",
-                                        "description": "New email for all."
-                                    },
-                                    "phone": {
-                                        "type": "string",
-                                        "description": "New phone for all."
-                                    },
-                                    "skills": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "New skills list for all."
-                                    },
-                                    "roles": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "New roles list for all."
-                                    }
-                                },
-                                "required": [
-                                    "consultantIds"
-                                ],
-                                "additionalProperties": false,
-                                "$schema": "http://json-schema.org/draft-07/schema#"
-                            },
-                            "execution": {
-                                "taskSupport": "forbidden"
-                            }
-                        },
-                        {
-                            "name": "assign-consultant-to-project",
-                            "description": "Assign a single consultant to a project with a specified role, optional billing rate, and optional forecast hours. Both project and consultant can be identified by ID or name.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "projectId": {
-                                        "type": "string",
-                                        "description": "The project ID or name (partial match, case-insensitive) to assign the consultant to."
-                                    },
-                                    "consultantId": {
-                                        "type": "string",
-                                        "description": "The consultant ID or name (partial match, case-insensitive) to assign."
-                                    },
-                                    "role": {
-                                        "type": "string",
-                                        "description": "The role the consultant will play on the project (e.g. Architect, Developer, Designer, Project lead)."
-                                    },
-                                    "billable": {
-                                        "type": "boolean",
-                                        "description": "Whether the assignment is billable. Defaults to true."
-                                    },
-                                    "rate": {
-                                        "type": "number",
-                                        "description": "Hourly rate for the consultant on this project. Defaults to 0."
-                                    }
-                                },
-                                "required": [
-                                    "projectId",
-                                    "consultantId",
-                                    "role"
-                                ],
-                                "additionalProperties": false,
-                                "$schema": "http://json-schema.org/draft-07/schema#"
-                            },
-                            "execution": {
-                                "taskSupport": "forbidden"
-                            }
-                        },
-                        {
-                            "name": "bulk-assign-consultants",
-                            "description": "Assign multiple consultants to a project at once. Each assignment includes a role, optional billing rate, and optional forecast. Project and consultants can be identified by ID or name.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "projectId": {
-                                        "type": "string",
-                                        "description": "The project ID or name (partial match, case-insensitive) to assign consultants to."
-                                    },
-                                    "consultantIds": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "string"
-                                        },
-                                        "description": "Array of consultant IDs or names (partial match, case-insensitive) to assign."
-                                    },
-                                    "role": {
-                                        "type": "string",
-                                        "description": "The role for all assigned consultants."
-                                    },
-                                    "billable": {
-                                        "type": "boolean",
-                                        "description": "Whether the assignments are billable. Defaults to true."
-                                    },
-                                    "rate": {
-                                        "type": "number",
-                                        "description": "Hourly rate for all assigned consultants. Defaults to 0."
-                                    }
-                                },
-                                "required": [
-                                    "projectId",
-                                    "consultantIds",
-                                    "role"
-                                ],
-                                "additionalProperties": false,
-                                "$schema": "http://json-schema.org/draft-07/schema#"
-                            },
-                            "execution": {
-                                "taskSupport": "forbidden"
-                            }
-                        },
-                        {
-                            "name": "remove-assignment",
-                            "description": "Remove a consultant's assignment from a project. Both project and consultant can be identified by ID or name.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "projectId": {
-                                        "type": "string",
-                                        "description": "The project ID or name (partial match, case-insensitive)."
-                                    },
-                                    "consultantId": {
-                                        "type": "string",
-                                        "description": "The consultant ID or name (partial match, case-insensitive) to remove from the project."
-                                    }
-                                },
-                                "required": [
-                                    "projectId",
-                                    "consultantId"
-                                ],
-                                "additionalProperties": false,
-                                "$schema": "http://json-schema.org/draft-07/schema#"
-                            },
-                            "execution": {
-                                "taskSupport": "forbidden"
-                            }
                         }
                     ]
                 }
             },
             "run_for_functions": [
-                "assign-consultant-to-project",
-                "bulk-assign-consultants",
-                "bulk-update-consultants",
-                "remove-assignment",
-                "search-consultants",
-                "show-bulk-editor",
-                "show-consultant-profile",
                 "show-hr-dashboard",
-                "show-project-details",
-                "update-consultant"
+                "show-consultant-profile",
+                "search-employees",
+                "list-employees",
+                "show-org-chart"
             ],
             "auth": {
                 "type": "None"

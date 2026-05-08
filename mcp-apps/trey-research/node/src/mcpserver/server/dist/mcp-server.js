@@ -1,9 +1,9 @@
 /**
- * HR Consultant MCP Server factory.
+ * HR MCP Server factory.
  *
+ * All data comes directly from Microsoft Graph API — no local storage.
  * Uses the MCP Apps standard (@modelcontextprotocol/ext-apps) for
- * widget resources and tool registration (replaces the old OpenAI
- * Apps SDK / text/html+skybridge approach).
+ * widget resources and tool registration.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -11,19 +11,11 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE, } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import * as db from "./db.js";
+import * as graph from "./graph-api.js";
 import { getPublicServerUrl } from "./index.js";
 // ─── Widget HTML loader ────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS_DIR = path.resolve(__dirname, "..", "..", "assets");
-/**
- * Read a widget's built HTML and inject the public server URL so the
- * widget can call back to this server even when it is loaded through a
- * tunnel or proxy (avoids private-network / mixed-content blocks).
- *
- * Injects a small `<script>` right after `<head>` that sets
- * `window.__SERVER_BASE_URL__`.
- */
 function readWidgetHtml(componentName) {
     if (!fs.existsSync(ASSETS_DIR)) {
         throw new Error(`Widget assets not found at ${ASSETS_DIR}. Run "npm run build:widgets" first.`);
@@ -34,7 +26,6 @@ function readWidgetHtml(componentName) {
         html = fs.readFileSync(directPath, "utf8");
     }
     else {
-        // Try hashed fallback
         const candidates = fs
             .readdirSync(ASSETS_DIR)
             .filter((f) => f.startsWith(`${componentName}-`) && f.endsWith(".html"))
@@ -47,7 +38,6 @@ function readWidgetHtml(componentName) {
     if (!html) {
         throw new Error(`Widget HTML for "${componentName}" not found in ${ASSETS_DIR}.`);
     }
-    // Inject public server URL into the widget
     const serverUrl = getPublicServerUrl();
     const injection = `<script>window.__SERVER_BASE_URL__=${JSON.stringify(serverUrl)};</script>`;
     html = html.replace("<head>", `<head>${injection}`);
@@ -57,43 +47,6 @@ function readWidgetHtml(componentName) {
 const DASHBOARD_URI = "ui://trey-hr/hr-dashboard.html";
 const PROFILE_URI = "ui://trey-hr/consultant-profile.html";
 const BULK_EDITOR_URI = "ui://trey-hr/bulk-editor.html";
-// ─── Entity → plain object helpers ─────────────────────────────────
-function parseConsultant(c) {
-    return {
-        id: c.rowKey,
-        name: c.name,
-        email: c.email,
-        phone: c.phone,
-        photoUrl: c.consultantPhotoUrl,
-        location: JSON.parse(c.location || "{}"),
-        skills: JSON.parse(c.skills || "[]"),
-        certifications: JSON.parse(c.certifications || "[]"),
-        roles: JSON.parse(c.roles || "[]"),
-    };
-}
-function parseProject(p) {
-    return {
-        id: p.rowKey,
-        name: p.name,
-        description: p.description,
-        clientName: p.clientName,
-        clientContact: p.clientContact,
-        clientEmail: p.clientEmail,
-        location: JSON.parse(p.location || "{}"),
-    };
-}
-function parseAssignment(a) {
-    return {
-        id: a.rowKey,
-        projectId: a.projectId,
-        consultantId: a.consultantId,
-        role: a.role,
-        billable: a.billable,
-        rate: a.rate,
-        forecast: JSON.parse(a.forecast || "[]"),
-        delivered: JSON.parse(a.delivered || "[]"),
-    };
-}
 // ─── Server factory ────────────────────────────────────────────────
 export function createHRServer() {
     const server = new McpServer({ name: "trey-hr-consultant", version: "1.0.0" });
@@ -123,84 +76,140 @@ export function createHRServer() {
     // show-hr-dashboard
     registerAppTool(server, "show-hr-dashboard", {
         title: "Show HR Dashboard",
-        description: "Display the HR consultant dashboard with KPIs. Accepts optional filters: consultantName, projectName, skill, role, billable — the dashboard auto-applies them so users see a focused view.",
+        description: "Display the HR organization dashboard with KPIs including total employees, departments, and organization info. Accepts optional filters: department, name, jobTitle.",
         inputSchema: {
-            consultantName: z.string().optional().describe("Optional consultant name to pre-filter the dashboard (partial match, case-insensitive)."),
-            projectName: z.string().optional().describe("Optional project name to pre-filter the dashboard (partial match, case-insensitive)."),
-            skill: z.string().optional().describe("Optional skill to pre-filter the dashboard — shows only consultants with this skill and their assignments."),
-            role: z.string().optional().describe("Optional role to pre-filter assignments (e.g. 'Developer', 'Architect')."),
-            billable: z.boolean().optional().describe("Optional — set true to show only billable assignments, false for non-billable."),
+            department: z.string().optional().describe("Optional department name to pre-filter the dashboard (partial match, case-insensitive)."),
+            name: z.string().optional().describe("Optional employee name to pre-filter the dashboard (partial match, case-insensitive)."),
+            jobTitle: z.string().optional().describe("Optional job title to pre-filter the dashboard (partial match, case-insensitive)."),
         },
         annotations: { readOnlyHint: true },
         _meta: { ui: { resourceUri: DASHBOARD_URI } },
-    }, async ({ consultantName, projectName, skill, role, billable }) => {
-        const [consultants, projects, assignments] = await Promise.all([
-            db.getAllConsultants(),
-            db.getAllProjects(),
-            db.getAllAssignments(),
+    }, async ({ department, name, jobTitle }) => {
+        const [users, org] = await Promise.all([
+            graph.listUsers(),
+            graph.getOrganization(),
         ]);
-        const totalBillableHours = assignments.reduce((sum, a) => {
-            if (!a.billable)
-                return sum;
-            const forecast = JSON.parse(a.forecast || "[]");
-            return sum + forecast.reduce((s, f) => s + f.hours, 0);
-        }, 0);
-        // Build active filter hints to pass to the widget
+        let filtered = users;
         const activeFilters = {};
         const filterDescParts = [];
-        if (consultantName) {
-            activeFilters.consultantName = consultantName;
-            filterDescParts.push(`consultant: "${consultantName}"`);
+        if (department) {
+            const q = department.toLowerCase();
+            filtered = filtered.filter((u) => u.department.toLowerCase().includes(q));
+            activeFilters.department = department;
+            filterDescParts.push(`department: "${department}"`);
         }
-        if (projectName) {
-            const q = projectName.toLowerCase();
-            const matchedIds = projects.filter((p) => p.name.toLowerCase().includes(q)).map((p) => p.rowKey);
-            activeFilters.projectIds = matchedIds;
-            activeFilters.projectName = projectName;
-            filterDescParts.push(`project: "${projectName}"`);
+        if (name) {
+            const q = name.toLowerCase();
+            filtered = filtered.filter((u) => u.displayName.toLowerCase().includes(q));
+            activeFilters.name = name;
+            filterDescParts.push(`name: "${name}"`);
         }
-        if (skill) {
-            activeFilters.skill = skill;
-            filterDescParts.push(`skill: "${skill}"`);
+        if (jobTitle) {
+            const q = jobTitle.toLowerCase();
+            filtered = filtered.filter((u) => u.jobTitle.toLowerCase().includes(q));
+            activeFilters.jobTitle = jobTitle;
+            filterDescParts.push(`jobTitle: "${jobTitle}"`);
         }
-        if (role) {
-            activeFilters.role = role;
-            filterDescParts.push(`role: "${role}"`);
+        // Compute department breakdown
+        const deptMap = new Map();
+        for (const u of filtered) {
+            const dept = u.department || "Unassigned";
+            deptMap.set(dept, (deptMap.get(dept) ?? 0) + 1);
         }
-        if (billable !== undefined) {
-            activeFilters.billable = billable;
-            filterDescParts.push(billable ? "billable only" : "non-billable only");
+        const departments = Array.from(deptMap.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count);
+        // Compute employee type breakdown
+        const typeMap = new Map();
+        for (const u of filtered) {
+            const type = u.employeeType || "Unknown";
+            typeMap.set(type, (typeMap.get(type) ?? 0) + 1);
         }
+        const employeeTypes = Array.from(typeMap.entries())
+            .map(([type, count]) => ({ type, count }))
+            .sort((a, b) => b.count - a.count);
         const dashboardData = {
-            consultants: consultants.map(parseConsultant),
-            projects: projects.map(parseProject),
-            assignments: assignments.map((a) => {
-                const parsed = parseAssignment(a);
-                const proj = projects.find((p) => p.rowKey === a.projectId);
-                const cons = consultants.find((c) => c.rowKey === a.consultantId);
-                return {
-                    ...parsed,
-                    projectName: proj?.name ?? "Unknown",
-                    clientName: proj?.clientName ?? "Unknown",
-                    consultantName: cons?.name ?? "Unknown",
-                };
-            }),
+            users: filtered.map((u) => ({
+                id: u.id,
+                displayName: u.displayName,
+                email: u.mail || u.userPrincipalName,
+                jobTitle: u.jobTitle,
+                department: u.department,
+                officeLocation: u.officeLocation,
+                employeeType: u.employeeType,
+                employeeId: u.employeeId,
+            })),
             summary: {
-                totalConsultants: consultants.length,
-                totalProjects: projects.length,
-                totalAssignments: assignments.length,
-                totalBillableHours,
+                totalEmployees: filtered.length,
+                totalInOrganization: users.length,
+                organizationName: org?.displayName ?? "Unknown",
+                departments,
+                employeeTypes,
             },
             ...(Object.keys(activeFilters).length > 0 ? { filters: activeFilters } : {}),
         };
         const filterDesc = filterDescParts.length > 0
             ? ` (filtered by ${filterDescParts.join(", ")})`
             : "";
+        // ── Build rich markdown text ──
+        const mdLines = [];
+        mdLines.push(`# HR Dashboard — ${org?.displayName ?? "Organization"}`);
+        mdLines.push("");
+        mdLines.push(`**${filtered.length}** employees across **${departments.length}** departments.${filterDesc}`);
+        mdLines.push("");
+        // Summary KPIs
+        mdLines.push("## 📊 Summary");
+        mdLines.push("");
+        mdLines.push(`| Metric | Value |`);
+        mdLines.push(`|--------|-------|`);
+        mdLines.push(`| Total Employees (filtered) | ${filtered.length} |`);
+        mdLines.push(`| Total in Organization | ${users.length} |`);
+        mdLines.push(`| Departments | ${departments.length} |`);
+        mdLines.push(`| Employee Types | ${employeeTypes.length} |`);
+        mdLines.push("");
+        // Department breakdown
+        if (departments.length > 0) {
+            mdLines.push("## 🏢 Department Breakdown");
+            mdLines.push("");
+            mdLines.push(`| Department | Employees |`);
+            mdLines.push(`|------------|-----------|`);
+            for (const d of departments) {
+                const bar = "█".repeat(Math.max(1, Math.round((d.count / departments[0].count) * 20)));
+                mdLines.push(`| ${d.name} | ${d.count} ${bar} |`);
+            }
+            mdLines.push("");
+        }
+        // Employee type breakdown
+        if (employeeTypes.length > 0) {
+            mdLines.push("## 👥 Employee Type Breakdown");
+            mdLines.push("");
+            mdLines.push(`| Type | Count |`);
+            mdLines.push(`|------|-------|`);
+            for (const et of employeeTypes) {
+                mdLines.push(`| ${et.type} | ${et.count} |`);
+            }
+            mdLines.push("");
+        }
+        // Recent employees (top 10)
+        if (filtered.length > 0) {
+            mdLines.push("## 👤 Employees");
+            mdLines.push("");
+            mdLines.push(`| Name | Job Title | Department | Email |`);
+            mdLines.push(`|------|-----------|------------|-------|`);
+            const displayUsers = filtered.slice(0, 20);
+            for (const u of displayUsers) {
+                mdLines.push(`| ${u.displayName} | ${u.jobTitle || "—"} | ${u.department || "—"} | ${u.mail || u.userPrincipalName} |`);
+            }
+            if (filtered.length > 20) {
+                mdLines.push(`| *… and ${filtered.length - 20} more* | | | |`);
+            }
+            mdLines.push("");
+        }
         return {
             content: [
                 {
                     type: "text",
-                    text: `HR Dashboard: ${consultants.length} consultants, ${projects.length} projects, ${totalBillableHours} billable hours forecasted.${filterDesc}`,
+                    text: mdLines.join("\n"),
                 },
             ],
             structuredContent: dashboardData,
@@ -208,293 +217,345 @@ export function createHRServer() {
     });
     // show-consultant-profile
     registerAppTool(server, "show-consultant-profile", {
-        title: "Show Consultant Profile",
-        description: "Display a detailed profile card for a specific consultant, including contact info, skills, certifications, roles, and current assignments.",
+        title: "Show Employee Profile",
+        description: "Display a detailed profile for an employee (by ID, email, or name), including contact info, job details, skills, certifications, education, languages, work history, manager, direct reports, and groups.",
         inputSchema: {
-            consultantId: z.string().describe("The ID of the consultant to view."),
+            employeeId: z.string().describe("The employee ID, email, or display name (partial match, case-insensitive) to view."),
         },
         annotations: { readOnlyHint: true },
         _meta: { ui: { resourceUri: PROFILE_URI } },
-    }, async ({ consultantId }) => {
-        const consultant = await db.getConsultantById(consultantId);
-        if (!consultant) {
-            return {
-                content: [{ type: "text", text: `Consultant ${consultantId} not found.` }],
-                isError: true,
-            };
+    }, async ({ employeeId }) => {
+        // Try to resolve the identifier to a user
+        let user = await graph.getUser(employeeId);
+        if (!user) {
+            // Try searching by name/email
+            const results = await graph.searchUsers(employeeId);
+            if (results.length === 0) {
+                return {
+                    content: [{ type: "text", text: `Employee "${employeeId}" not found.` }],
+                    isError: true,
+                };
+            }
+            user = results[0];
         }
-        const assignments = await db.getAssignmentsByConsultant(consultantId);
-        const allProjects = await db.getAllProjects();
-        const projectMap = new Map(allProjects.map((p) => [p.rowKey, parseProject(p)]));
-        const enrichedAssignments = assignments.map((a) => ({
-            ...parseAssignment(a),
-            projectName: projectMap.get(a.projectId)?.name ?? "Unknown",
-            clientName: projectMap.get(a.projectId)?.clientName ?? "Unknown",
-        }));
+        // Fetch rich profile data in parallel
+        const [profile, manager, directReports, groups, activityStats] = await Promise.all([
+            graph.getUserProfile(user.id),
+            graph.getUserManager(user.id),
+            graph.getUserDirectReports(user.id),
+            graph.getUserGroups(user.id),
+            graph.getUserActivityStats(user.id),
+        ]);
         const profileData = {
-            consultant: parseConsultant(consultant),
-            assignments: enrichedAssignments,
+            user,
+            profile,
+            manager,
+            directReports,
+            groups,
+            activityStats,
         };
+        const skillCount = profile.skills.length;
+        const certCount = profile.certifications.length;
+        const reportCount = directReports.length;
+        // ── Build rich markdown text ──
+        const mdLines = [];
+        mdLines.push(`# 👤 ${user.displayName}`);
+        mdLines.push("");
+        // Contact & Job Info
+        mdLines.push("## 📋 Profile Overview");
+        mdLines.push("");
+        mdLines.push(`| Field | Value |`);
+        mdLines.push(`|-------|-------|`);
+        mdLines.push(`| **Job Title** | ${user.jobTitle || "—"} |`);
+        mdLines.push(`| **Department** | ${user.department || "—"} |`);
+        mdLines.push(`| **Email** | ${user.mail || user.userPrincipalName} |`);
+        mdLines.push(`| **Phone** | ${user.mobilePhone || user.businessPhones?.[0] || "—"} |`);
+        mdLines.push(`| **Office Location** | ${user.officeLocation || "—"} |`);
+        mdLines.push(`| **Employee Type** | ${user.employeeType || "—"} |`);
+        mdLines.push(`| **Employee ID** | ${user.employeeId || "—"} |`);
+        mdLines.push("");
+        // Manager
+        if (manager) {
+            mdLines.push(`**Manager:** ${manager.displayName} (${manager.jobTitle || "—"})`);
+        }
+        else {
+            mdLines.push("**Manager:** None (top-level)");
+        }
+        mdLines.push("");
+        // Skills
+        if (profile.skills.length > 0) {
+            mdLines.push("## 🛠️ Skills");
+            mdLines.push("");
+            mdLines.push(profile.skills.map((s) => `- ${s}`).join("\n"));
+            mdLines.push("");
+        }
+        // Certifications
+        if (profile.certifications.length > 0) {
+            mdLines.push("## 📜 Certifications");
+            mdLines.push("");
+            for (const cert of profile.certifications) {
+                mdLines.push(`- ${cert}`);
+            }
+            mdLines.push("");
+        }
+        // Education
+        if (profile.educationalActivities?.length > 0) {
+            mdLines.push("## 🎓 Education");
+            mdLines.push("");
+            for (const edu of profile.educationalActivities) {
+                mdLines.push(`- **${edu.degree || "Degree"}** in ${edu.fieldOfStudy || "—"} — ${edu.institution || "—"}`);
+            }
+            mdLines.push("");
+        }
+        // Languages
+        if (profile.languages?.length > 0) {
+            mdLines.push(`## 🌐 Languages (${profile.languages.length})`);
+            mdLines.push("");
+            for (const lang of profile.languages) {
+                mdLines.push(`- ${lang.displayName}${lang.proficiency ? ` (${lang.proficiency})` : ""}`);
+            }
+            mdLines.push("");
+        }
+        // Work History (positions)
+        if (profile.positions?.length > 0) {
+            mdLines.push("## 💼 Work History");
+            mdLines.push("");
+            for (const pos of profile.positions) {
+                mdLines.push(`- **${pos.title || "—"}** at ${pos.company || "—"}${pos.startDate ? ` (${pos.startDate}${pos.endDate ? ` — ${pos.endDate}` : " — Present"})` : ""}`);
+            }
+            mdLines.push("");
+        }
+        // Direct Reports
+        if (directReports.length > 0) {
+            mdLines.push(`## 👥 Direct Reports (${directReports.length})`);
+            mdLines.push("");
+            mdLines.push(`| Name | Job Title |`);
+            mdLines.push(`|------|-----------|`);
+            for (const dr of directReports) {
+                mdLines.push(`| ${dr.displayName} | ${dr.jobTitle || "—"} |`);
+            }
+            mdLines.push("");
+        }
+        // Groups
+        if (groups.length > 0) {
+            mdLines.push(`## 👪 Groups (${groups.length})`);
+            mdLines.push("");
+            for (const g of groups) {
+                mdLines.push(`- ${g.displayName || g.id}`);
+            }
+            mdLines.push("");
+        }
+        // Activity Stats
+        if (activityStats) {
+            mdLines.push("## 📊 Activity Stats (7 days)");
+            mdLines.push("");
+            mdLines.push(`| Metric | Value |`);
+            mdLines.push(`|--------|-------|`);
+            mdLines.push(`| Emails Sent | ${activityStats.email?.send ?? "—"} |`);
+            mdLines.push(`| Emails Received | ${activityStats.email?.receive ?? "—"} |`);
+            mdLines.push(`| Chats Sent | ${activityStats.chats?.send ?? "—"} |`);
+            mdLines.push(`| Chats Received | ${activityStats.chats?.receive ?? "—"} |`);
+            mdLines.push(`| Meetings Organized | ${activityStats.meetings?.organize ?? "—"} |`);
+            mdLines.push(`| Meetings Attended | ${activityStats.meetings?.attend ?? "—"} |`);
+            mdLines.push(`| Focus Hours | ${activityStats.focus?.hours ?? "—"} |`);
+            mdLines.push("");
+        }
         return {
             content: [
                 {
                     type: "text",
-                    text: `Profile for ${consultant.name}: ${JSON.parse(consultant.skills || "[]").join(", ")} | ${enrichedAssignments.length} active assignment(s).`,
+                    text: mdLines.join("\n"),
                 },
             ],
             structuredContent: profileData,
         };
     });
-    // search-consultants
-    registerAppTool(server, "search-consultants", {
-        title: "Search Consultants",
-        description: "Search consultants by skill or name. Returns matching consultants in the bulk editor widget for easy viewing and editing.",
+    // search-employees
+    registerAppTool(server, "search-employees", {
+        title: "Search Employees",
+        description: "Search employees by name, email, job title, or department. Returns matching employees from the organization directory.",
         inputSchema: {
-            skill: z.string().optional().describe("Skill to search for (partial match)."),
-            name: z.string().optional().describe("Name to search for (partial match)."),
+            query: z.string().describe("Search query to find employees (matches displayName, mail, userPrincipalName, jobTitle, department)."),
         },
         annotations: { readOnlyHint: true },
         _meta: { ui: { resourceUri: BULK_EDITOR_URI } },
-    }, async ({ skill, name: nameFilter }) => {
-        let results = await db.getAllConsultants();
-        if (skill) {
-            results = results.filter((c) => {
-                const skills = JSON.parse(c.skills || "[]");
-                return skills.some((s) => s.toLowerCase().includes(skill.toLowerCase()));
-            });
-        }
-        if (nameFilter) {
-            results = results.filter((c) => c.name.toLowerCase().includes(nameFilter.toLowerCase()));
+    }, async ({ query }) => {
+        const users = await graph.searchUsers(query);
+        // ── Build rich markdown text ──
+        const mdLines = [];
+        mdLines.push(`# 🔍 Employee Search Results`);
+        mdLines.push("");
+        mdLines.push(`Found **${users.length}** employee(s) matching "${query}".`);
+        mdLines.push("");
+        if (users.length > 0) {
+            mdLines.push(`| Name | Job Title | Department | Email |`);
+            mdLines.push(`|------|-----------|------------|-------|`);
+            for (const u of users) {
+                mdLines.push(`| ${u.displayName} | ${u.jobTitle || "—"} | ${u.department || "—"} | ${u.mail || u.userPrincipalName} |`);
+            }
+            mdLines.push("");
         }
         return {
             content: [
                 {
                     type: "text",
-                    text: `Found ${results.length} consultant(s) matching criteria.`,
+                    text: mdLines.join("\n"),
                 },
             ],
             structuredContent: {
-                consultants: results.map(parseConsultant),
+                users: users.map((u) => ({
+                    id: u.id,
+                    displayName: u.displayName,
+                    email: u.mail || u.userPrincipalName,
+                    jobTitle: u.jobTitle,
+                    department: u.department,
+                    officeLocation: u.officeLocation,
+                    employeeType: u.employeeType,
+                    employeeId: u.employeeId,
+                })),
             },
         };
     });
-    // show-bulk-editor
-    registerAppTool(server, "show-bulk-editor", {
-        title: "Show Bulk Editor",
-        description: "Open the bulk editor widget to view and edit consultant records. Accepts optional filters: skill, name — to show only matching consultants.",
+    // list-employees
+    registerAppTool(server, "list-employees", {
+        title: "List All Employees",
+        description: "List all employees in the organization directory. Returns up to 200 employees with their profile information.",
         inputSchema: {
-            skill: z.string().optional().describe("Optional skill to filter consultants (partial match, case-insensitive)."),
-            name: z.string().optional().describe("Optional name to filter consultants (partial match, case-insensitive)."),
+            _: z.string().optional().describe("No parameters needed."),
         },
-        annotations: { readOnlyHint: false },
+        annotations: { readOnlyHint: true },
         _meta: { ui: { resourceUri: BULK_EDITOR_URI } },
-    }, async ({ skill, name: nameFilter }) => {
-        let consultants = await db.getAllConsultants();
-        if (skill) {
-            consultants = consultants.filter((c) => {
-                const skills = JSON.parse(c.skills || "[]");
-                return skills.some((s) => s.toLowerCase().includes(skill.toLowerCase()));
-            });
+    }, async () => {
+        const users = await graph.listUsers();
+        // ── Build rich markdown text ──
+        const mdLines = [];
+        mdLines.push(`# 📋 All Employees`);
+        mdLines.push("");
+        mdLines.push(`Found **${users.length}** employee(s) in the organization.`);
+        mdLines.push("");
+        if (users.length > 0) {
+            mdLines.push(`| Name | Job Title | Department | Email |`);
+            mdLines.push(`|------|-----------|------------|-------|`);
+            const displayUsers = users.slice(0, 50);
+            for (const u of displayUsers) {
+                mdLines.push(`| ${u.displayName} | ${u.jobTitle || "—"} | ${u.department || "—"} | ${u.mail || u.userPrincipalName} |`);
+            }
+            if (users.length > 50) {
+                mdLines.push(`| *… and ${users.length - 50} more* | | | |`);
+            }
+            mdLines.push("");
         }
-        if (nameFilter) {
-            consultants = consultants.filter((c) => c.name.toLowerCase().includes(nameFilter.toLowerCase()));
-        }
-        const filterDesc = [skill && `skill: "${skill}"`, nameFilter && `name: "${nameFilter}"`].filter(Boolean).join(", ");
         return {
             content: [
                 {
                     type: "text",
-                    text: `Bulk editor loaded with ${consultants.length} consultant record(s)${filterDesc ? ` (filtered by ${filterDesc})` : ""}.`,
+                    text: mdLines.join("\n"),
                 },
             ],
             structuredContent: {
-                consultants: consultants.map(parseConsultant),
+                users: users.map((u) => ({
+                    id: u.id,
+                    displayName: u.displayName,
+                    email: u.mail || u.userPrincipalName,
+                    jobTitle: u.jobTitle,
+                    department: u.department,
+                    officeLocation: u.officeLocation,
+                    employeeType: u.employeeType,
+                    employeeId: u.employeeId,
+                })),
             },
         };
     });
-    // show-project-details
-    registerAppTool(server, "show-project-details", {
-        title: "Show Project Details",
-        description: "Display detailed information about a specific project including its assigned consultants and forecasted hours.",
+    // show-org-chart
+    registerAppTool(server, "show-org-chart", {
+        title: "Show Organization Chart",
+        description: "Display the organization hierarchy for an employee, showing their manager, direct reports, and team structure.",
         inputSchema: {
-            projectId: z.string().describe("The project ID."),
+            employeeId: z.string().describe("The employee ID, email, or display name (partial match, case-insensitive) to view the org chart for."),
         },
         annotations: { readOnlyHint: true },
         _meta: { ui: { resourceUri: DASHBOARD_URI } },
-    }, async ({ projectId }) => {
-        const project = await db.getProjectById(projectId);
-        if (!project) {
-            return {
-                content: [{ type: "text", text: `Project ${projectId} not found.` }],
-                isError: true,
-            };
+    }, async ({ employeeId }) => {
+        let user = await graph.getUser(employeeId);
+        if (!user) {
+            const results = await graph.searchUsers(employeeId);
+            if (results.length === 0) {
+                return {
+                    content: [{ type: "text", text: `Employee "${employeeId}" not found.` }],
+                    isError: true,
+                };
+            }
+            user = results[0];
         }
-        const assignments = await db.getAssignmentsByProject(projectId);
-        const allConsultants = await db.getAllConsultants();
-        const consultantMap = new Map(allConsultants.map((c) => [c.rowKey, parseConsultant(c)]));
-        const enrichedAssignments = assignments.map((a) => ({
-            ...parseAssignment(a),
-            consultantName: consultantMap.get(a.consultantId)?.name ?? "Unknown",
-        }));
-        const totalBillableHours = enrichedAssignments.reduce((sum, a) => {
-            return sum + a.forecast.reduce((s, f) => s + f.hours, 0);
-        }, 0);
+        const [manager, directReports] = await Promise.all([
+            graph.getUserManager(user.id),
+            graph.getUserDirectReports(user.id),
+        ]);
+        // ── Build rich markdown text ──
+        const mdLines = [];
+        mdLines.push(`# 🏢 Organization Chart`);
+        mdLines.push("");
+        mdLines.push(`## 👤 ${user.displayName}`);
+        mdLines.push(`**${user.jobTitle || "—"}** · ${user.department || "—"}`);
+        mdLines.push("");
+        // Manager
+        mdLines.push("### ⬆️ Manager");
+        mdLines.push("");
+        if (manager) {
+            mdLines.push(`- **${manager.displayName}** — ${manager.jobTitle || "—"}`);
+        }
+        else {
+            mdLines.push(`- *(No manager — top-level)*`);
+        }
+        mdLines.push("");
+        // Direct Reports
+        if (directReports.length > 0) {
+            mdLines.push(`### ⬇️ Direct Reports (${directReports.length})`);
+            mdLines.push("");
+            mdLines.push(`| Name | Job Title |`);
+            mdLines.push(`|------|-----------|`);
+            for (const dr of directReports) {
+                mdLines.push(`| ${dr.displayName} | ${dr.jobTitle || "—"} |`);
+            }
+            mdLines.push("");
+        }
+        else {
+            mdLines.push("### ⬇️ Direct Reports");
+            mdLines.push("");
+            mdLines.push("*(No direct reports)*");
+            mdLines.push("");
+        }
+        // Hierarchy visualization
+        mdLines.push("### 📊 Hierarchy");
+        mdLines.push("");
+        mdLines.push("```");
+        if (manager) {
+            mdLines.push(`${manager.displayName} (Manager)`);
+            mdLines.push(`  └── ${user.displayName} (You)`);
+        }
+        else {
+            mdLines.push(`${user.displayName} (You)`);
+        }
+        for (const dr of directReports) {
+            mdLines.push(`       ├── ${dr.displayName}`);
+        }
+        if (directReports.length > 0) {
+            mdLines.push(`       └── (${directReports.length} total)`);
+        }
+        mdLines.push("```");
+        mdLines.push("");
         return {
             content: [
                 {
                     type: "text",
-                    text: `Project "${project.name}" for ${project.clientName}: ${enrichedAssignments.length} assignment(s).`,
+                    text: mdLines.join("\n"),
                 },
             ],
             structuredContent: {
-                projects: [parseProject(project)],
-                assignments: enrichedAssignments,
-                consultants: allConsultants.map((c) => parseConsultant(c)),
-                summary: {
-                    totalConsultants: allConsultants.length,
-                    totalProjects: 1,
-                    totalAssignments: enrichedAssignments.length,
-                    totalBillableHours,
-                },
+                employee: user,
+                manager,
+                directReports,
             },
-        };
-    });
-    // ─── Data-only tools (no UI) ───────────────────────────────────
-    // update-consultant
-    server.tool("update-consultant", "Update a single consultant's information (name, email, phone, skills, roles).", {
-        consultantId: z.string().describe("The ID of the consultant to update."),
-        name: z.string().optional().describe("Updated name."),
-        email: z.string().optional().describe("Updated email."),
-        phone: z.string().optional().describe("Updated phone."),
-        skills: z.array(z.string()).optional().describe("Updated skills list."),
-        roles: z.array(z.string()).optional().describe("Updated roles list."),
-    }, async ({ consultantId, ...updates }) => {
-        const updated = await db.updateConsultant(consultantId, updates);
-        if (!updated) {
-            return {
-                content: [{ type: "text", text: `Consultant ${consultantId} not found.` }],
-                isError: true,
-            };
-        }
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Updated consultant ${updated.name} (ID: ${consultantId}).`,
-                },
-            ],
-        };
-    });
-    // bulk-update-consultants
-    server.tool("bulk-update-consultants", "Batch-update multiple consultant records at once.", {
-        consultantIds: z.array(z.string()).describe("Array of consultant IDs to update."),
-        name: z.string().optional().describe("New name for all."),
-        email: z.string().optional().describe("New email for all."),
-        phone: z.string().optional().describe("New phone for all."),
-        skills: z.array(z.string()).optional().describe("New skills list for all."),
-        roles: z.array(z.string()).optional().describe("New roles list for all."),
-    }, async ({ consultantIds, ...changes }) => {
-        const results = [];
-        for (const consultantId of consultantIds) {
-            const updated = await db.updateConsultant(consultantId, changes);
-            results.push(updated
-                ? `✓ Updated ${updated.name}`
-                : `✗ Consultant ${consultantId} not found`);
-        }
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Bulk update complete:\n${results.join("\n")}`,
-                },
-            ],
-        };
-    });
-    // assign-consultant-to-project
-    server.tool("assign-consultant-to-project", "Assign a single consultant to a project with a specified role, optional billing rate, and optional forecast hours.", {
-        projectId: z.string().describe("The project ID to assign the consultant to."),
-        consultantId: z.string().describe("The consultant ID to assign."),
-        role: z.string().describe("The role the consultant will play on the project (e.g. Architect, Developer, Designer, Project lead)."),
-        billable: z.boolean().optional().describe("Whether the assignment is billable. Defaults to true."),
-        rate: z.number().optional().describe("Hourly rate for the consultant on this project. Defaults to 0."),
-    }, async ({ projectId, consultantId, role, billable, rate }) => {
-        const project = await db.getProjectById(projectId);
-        if (!project) {
-            return {
-                content: [{ type: "text", text: `Project ${projectId} not found.` }],
-                isError: true,
-            };
-        }
-        const consultant = await db.getConsultantById(consultantId);
-        if (!consultant) {
-            return {
-                content: [{ type: "text", text: `Consultant ${consultantId} not found.` }],
-                isError: true,
-            };
-        }
-        await db.createAssignment({ projectId, consultantId, role, billable, rate });
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Assigned ${consultant.name} to project "${project.name}" as ${role}${billable === false ? " (non-billable)" : ""}${rate ? ` at $${rate}/hr` : ""}.`,
-                },
-            ],
-        };
-    });
-    // bulk-assign-consultants
-    server.tool("bulk-assign-consultants", "Assign multiple consultants to a project at once. Each assignment includes a role, optional billing rate, and optional forecast.", {
-        projectId: z.string().describe("The project ID to assign consultants to."),
-        consultantIds: z.array(z.string()).describe("Array of consultant IDs to assign."),
-        role: z.string().describe("The role for all assigned consultants."),
-        billable: z.boolean().optional().describe("Whether the assignments are billable. Defaults to true."),
-        rate: z.number().optional().describe("Hourly rate for all assigned consultants. Defaults to 0."),
-    }, async ({ projectId, consultantIds, role, billable, rate }) => {
-        const project = await db.getProjectById(projectId);
-        if (!project) {
-            return {
-                content: [{ type: "text", text: `Project ${projectId} not found.` }],
-                isError: true,
-            };
-        }
-        const results = [];
-        for (const consultantId of consultantIds) {
-            const consultant = await db.getConsultantById(consultantId);
-            if (!consultant) {
-                results.push(`✗ Consultant ${consultantId} not found`);
-                continue;
-            }
-            await db.createAssignment({ projectId, consultantId, role, billable, rate });
-            results.push(`✓ Assigned ${consultant.name} as ${role}`);
-        }
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Bulk assignment to "${project.name}" complete:\n${results.join("\n")}`,
-                },
-            ],
-        };
-    });
-    // remove-assignment
-    server.tool("remove-assignment", "Remove a consultant's assignment from a project.", {
-        projectId: z.string().describe("The project ID."),
-        consultantId: z.string().describe("The consultant ID to remove from the project."),
-    }, async ({ projectId, consultantId }) => {
-        const removed = await db.deleteAssignment(projectId, consultantId);
-        if (!removed) {
-            return {
-                content: [{ type: "text", text: `Assignment for consultant ${consultantId} on project ${projectId} not found.` }],
-                isError: true,
-            };
-        }
-        return {
-            content: [
-                {
-                    type: "text",
-                    text: `Removed assignment: consultant ${consultantId} from project ${projectId}.`,
-                },
-            ],
         };
     });
     return server;

@@ -1,9 +1,9 @@
 /**
- * HR Consultant MCP Server factory.
+ * HR MCP Server factory.
  *
+ * All data comes directly from Microsoft Graph API — no local storage.
  * Uses the MCP Apps standard (@modelcontextprotocol/ext-apps) for
- * widget resources and tool registration (replaces the old OpenAI
- * Apps SDK / text/html+skybridge approach).
+ * widget resources and tool registration.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -15,21 +15,13 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import * as db from "./db.js";
+import * as graph from "./graph-api.js";
 import { getPublicServerUrl } from "./index.js";
 
 // ─── Widget HTML loader ────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS_DIR = path.resolve(__dirname, "..", "..", "assets");
 
-/**
- * Read a widget's built HTML and inject the public server URL so the
- * widget can call back to this server even when it is loaded through a
- * tunnel or proxy (avoids private-network / mixed-content blocks).
- *
- * Injects a small `<script>` right after `<head>` that sets
- * `window.__SERVER_BASE_URL__`.
- */
 function readWidgetHtml(componentName: string): string {
   if (!fs.existsSync(ASSETS_DIR)) {
     throw new Error(
@@ -41,7 +33,6 @@ function readWidgetHtml(componentName: string): string {
   if (fs.existsSync(directPath)) {
     html = fs.readFileSync(directPath, "utf8");
   } else {
-    // Try hashed fallback
     const candidates = fs
       .readdirSync(ASSETS_DIR)
       .filter((f) => f.startsWith(`${componentName}-`) && f.endsWith(".html"))
@@ -55,7 +46,6 @@ function readWidgetHtml(componentName: string): string {
     throw new Error(`Widget HTML for "${componentName}" not found in ${ASSETS_DIR}.`);
   }
 
-  // Inject public server URL into the widget
   const serverUrl = getPublicServerUrl();
   const injection = `<script>window.__SERVER_BASE_URL__=${JSON.stringify(serverUrl)};</script>`;
   html = html.replace("<head>", `<head>${injection}`);
@@ -67,47 +57,6 @@ function readWidgetHtml(componentName: string): string {
 const DASHBOARD_URI = "ui://trey-hr/hr-dashboard.html";
 const PROFILE_URI = "ui://trey-hr/consultant-profile.html";
 const BULK_EDITOR_URI = "ui://trey-hr/bulk-editor.html";
-
-// ─── Entity → plain object helpers ─────────────────────────────────
-
-function parseConsultant(c: db.ConsultantEntity) {
-  return {
-    id: c.rowKey,
-    name: c.name,
-    email: c.email,
-    phone: c.phone,
-    photoUrl: c.consultantPhotoUrl,
-    location: JSON.parse(c.location || "{}"),
-    skills: JSON.parse(c.skills || "[]"),
-    certifications: JSON.parse(c.certifications || "[]"),
-    roles: JSON.parse(c.roles || "[]"),
-  };
-}
-
-function parseProject(p: db.ProjectEntity) {
-  return {
-    id: p.rowKey,
-    name: p.name,
-    description: p.description,
-    clientName: p.clientName,
-    clientContact: p.clientContact,
-    clientEmail: p.clientEmail,
-    location: JSON.parse(p.location || "{}"),
-  };
-}
-
-function parseAssignment(a: db.AssignmentEntity) {
-  return {
-    id: a.rowKey,
-    projectId: a.projectId,
-    consultantId: a.consultantId,
-    role: a.role,
-    billable: a.billable,
-    rate: a.rate,
-    forecast: JSON.parse(a.forecast || "[]"),
-    delivered: JSON.parse(a.delivered || "[]"),
-  };
-}
 
 // ─── Server factory ────────────────────────────────────────────────
 
@@ -139,82 +88,86 @@ export function createHRServer(): McpServer {
     return { contents: [{ uri: BULK_EDITOR_URI, mimeType: RESOURCE_MIME_TYPE, text: html }] };
   });
 
-  // ─── Widget Tools (render UI) ──────────────────────────────────
+  // ─── Tools ─────────────────────────────────────────────────────
 
   // show-hr-dashboard
   registerAppTool(server, "show-hr-dashboard", {
     title: "Show HR Dashboard",
     description:
-      "Display the HR consultant dashboard with KPIs. Accepts optional filters: consultantName, projectName, skill, role, billable — the dashboard auto-applies them so users see a focused view.",
+      "Display the HR organization dashboard with KPIs including total employees, departments, and organization info. Accepts optional filters: department, name, jobTitle.",
     inputSchema: {
-      consultantName: z.string().optional().describe("Optional consultant name to pre-filter the dashboard (partial match, case-insensitive)."),
-      projectName: z.string().optional().describe("Optional project name to pre-filter the dashboard (partial match, case-insensitive)."),
-      skill: z.string().optional().describe("Optional skill to pre-filter the dashboard — shows only consultants with this skill and their assignments."),
-      role: z.string().optional().describe("Optional role to pre-filter assignments (e.g. 'Developer', 'Architect')."),
-      billable: z.boolean().optional().describe("Optional — set true to show only billable assignments, false for non-billable."),
+      department: z.string().optional().describe("Optional department name to pre-filter the dashboard (partial match, case-insensitive)."),
+      name: z.string().optional().describe("Optional employee name to pre-filter the dashboard (partial match, case-insensitive)."),
+      jobTitle: z.string().optional().describe("Optional job title to pre-filter the dashboard (partial match, case-insensitive)."),
     },
     annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: DASHBOARD_URI } },
-  }, async ({ consultantName, projectName, skill, role, billable }) => {
-    const [consultants, projects, assignments] = await Promise.all([
-      db.getAllConsultants(),
-      db.getAllProjects(),
-      db.getAllAssignments(),
+  }, async ({ department, name, jobTitle }) => {
+    const [users, org] = await Promise.all([
+      graph.listUsers(),
+      graph.getOrganization(),
     ]);
 
-    const totalBillableHours = assignments.reduce((sum, a) => {
-      if (!a.billable) return sum;
-      const forecast: Array<{ hours: number }> = JSON.parse(a.forecast || "[]");
-      return sum + forecast.reduce((s, f) => s + f.hours, 0);
-    }, 0);
-
-    // Build active filter hints to pass to the widget
+    let filtered = users;
     const activeFilters: Record<string, unknown> = {};
     const filterDescParts: string[] = [];
 
-    if (consultantName) {
-      activeFilters.consultantName = consultantName;
-      filterDescParts.push(`consultant: "${consultantName}"`);
+    if (department) {
+      const q = department.toLowerCase();
+      filtered = filtered.filter((u) => u.department.toLowerCase().includes(q));
+      activeFilters.department = department;
+      filterDescParts.push(`department: "${department}"`);
     }
-    if (projectName) {
-      const q = projectName.toLowerCase();
-      const matchedIds = projects.filter((p) => p.name.toLowerCase().includes(q)).map((p) => p.rowKey);
-      activeFilters.projectIds = matchedIds;
-      activeFilters.projectName = projectName;
-      filterDescParts.push(`project: "${projectName}"`);
+    if (name) {
+      const q = name.toLowerCase();
+      filtered = filtered.filter((u) => u.displayName.toLowerCase().includes(q));
+      activeFilters.name = name;
+      filterDescParts.push(`name: "${name}"`);
     }
-    if (skill) {
-      activeFilters.skill = skill;
-      filterDescParts.push(`skill: "${skill}"`);
-    }
-    if (role) {
-      activeFilters.role = role;
-      filterDescParts.push(`role: "${role}"`);
-    }
-    if (billable !== undefined) {
-      activeFilters.billable = billable;
-      filterDescParts.push(billable ? "billable only" : "non-billable only");
+    if (jobTitle) {
+      const q = jobTitle.toLowerCase();
+      filtered = filtered.filter((u) => u.jobTitle.toLowerCase().includes(q));
+      activeFilters.jobTitle = jobTitle;
+      filterDescParts.push(`jobTitle: "${jobTitle}"`);
     }
 
+    // Compute department breakdown
+    const deptMap = new Map<string, number>();
+    for (const u of filtered) {
+      const dept = u.department || "Unassigned";
+      deptMap.set(dept, (deptMap.get(dept) ?? 0) + 1);
+    }
+    const departments = Array.from(deptMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+
+    // Compute employee type breakdown
+    const typeMap = new Map<string, number>();
+    for (const u of filtered) {
+      const type = u.employeeType || "Unknown";
+      typeMap.set(type, (typeMap.get(type) ?? 0) + 1);
+    }
+    const employeeTypes = Array.from(typeMap.entries())
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count);
+
     const dashboardData = {
-      consultants: consultants.map(parseConsultant),
-      projects: projects.map(parseProject),
-      assignments: assignments.map((a) => {
-        const parsed = parseAssignment(a);
-        const proj = projects.find((p) => p.rowKey === a.projectId);
-        const cons = consultants.find((c) => c.rowKey === a.consultantId);
-        return {
-          ...parsed,
-          projectName: proj?.name ?? "Unknown",
-          clientName: proj?.clientName ?? "Unknown",
-          consultantName: cons?.name ?? "Unknown",
-        };
-      }),
+      users: filtered.map((u) => ({
+        id: u.id,
+        displayName: u.displayName,
+        email: u.mail || u.userPrincipalName,
+        jobTitle: u.jobTitle,
+        department: u.department,
+        officeLocation: u.officeLocation,
+        employeeType: u.employeeType,
+        employeeId: u.employeeId,
+      })),
       summary: {
-        totalConsultants: consultants.length,
-        totalProjects: projects.length,
-        totalAssignments: assignments.length,
-        totalBillableHours,
+        totalEmployees: filtered.length,
+        totalInOrganization: users.length,
+        organizationName: org?.displayName ?? "Unknown",
+        departments,
+        employeeTypes,
       },
       ...(Object.keys(activeFilters).length > 0 ? { filters: activeFilters } : {}),
     };
@@ -227,7 +180,7 @@ export function createHRServer(): McpServer {
       content: [
         {
           type: "text" as const,
-          text: `HR Dashboard: ${consultants.length} consultants, ${projects.length} projects, ${totalBillableHours} billable hours forecasted.${filterDesc}`,
+          text: `HR Dashboard: ${filtered.length} employees across ${departments.length} departments.${filterDesc}`,
         },
       ],
       structuredContent: dashboardData,
@@ -236,347 +189,169 @@ export function createHRServer(): McpServer {
 
   // show-consultant-profile
   registerAppTool(server, "show-consultant-profile", {
-    title: "Show Consultant Profile",
+    title: "Show Employee Profile",
     description:
-      "Display a detailed profile card for a specific consultant (by ID or name), including contact info, skills, certifications, roles, and current assignments.",
+      "Display a detailed profile for an employee (by ID, email, or name), including contact info, job details, skills, certifications, education, languages, work history, manager, direct reports, and groups.",
     inputSchema: {
-      consultantId: z.string().describe("The ID or name (partial match, case-insensitive) of the consultant to view."),
+      employeeId: z.string().describe("The employee ID, email, or display name (partial match, case-insensitive) to view."),
     },
     annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: PROFILE_URI } },
-  }, async ({ consultantId }) => {
-    const consultant = await db.resolveConsultant(consultantId);
-    if (!consultant) {
-      return {
-        content: [{ type: "text" as const, text: `Consultant "${consultantId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
+  }, async ({ employeeId }) => {
+    let user = await graph.getUser(employeeId);
+    if (!user) {
+      const results = await graph.searchUsers(employeeId);
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: `Employee "${employeeId}" not found.` }],
+          isError: true,
+        };
+      }
+      user = results[0];
     }
-    const resolvedConsultantId = consultant.rowKey;
-    const assignments = await db.getAssignmentsByConsultant(resolvedConsultantId);
-    const allProjects = await db.getAllProjects();
-    const projectMap = new Map(allProjects.map((p) => [p.rowKey, parseProject(p)]));
 
-    const enrichedAssignments = assignments.map((a) => ({
-      ...parseAssignment(a),
-      projectName: projectMap.get(a.projectId)?.name ?? "Unknown",
-      clientName: projectMap.get(a.projectId)?.clientName ?? "Unknown",
-    }));
+    const [profile, manager, directReports, groups, activityStats] = await Promise.all([
+      graph.getUserProfile(user.id),
+      graph.getUserManager(user.id),
+      graph.getUserDirectReports(user.id),
+      graph.getUserGroups(user.id),
+      graph.getUserActivityStats(user.id),
+    ]);
 
     const profileData = {
-      consultant: parseConsultant(consultant),
-      assignments: enrichedAssignments,
+      user,
+      profile,
+      manager,
+      directReports,
+      groups,
+      activityStats,
     };
+
+    const skillCount = profile.skills.length;
+    const certCount = profile.certifications.length;
+    const reportCount = directReports.length;
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Profile for ${consultant.name}: ${JSON.parse(consultant.skills || "[]").join(", ")} | ${enrichedAssignments.length} active assignment(s).`,
+          text: `Profile for ${user.displayName}: ${user.jobTitle} in ${user.department}. ${skillCount} skills, ${certCount} certifications, ${reportCount} direct report(s).`,
         },
       ],
       structuredContent: profileData,
     };
   });
 
-  // search-consultants
-  registerAppTool(server, "search-consultants", {
-    title: "Search Consultants",
+  // search-employees
+  registerAppTool(server, "search-employees", {
+    title: "Search Employees",
     description:
-      "Search consultants by skill or name. Returns matching consultants in the bulk editor widget for easy viewing and editing.",
+      "Search employees by name, email, job title, or department. Returns matching employees from the organization directory.",
     inputSchema: {
-      skill: z.string().optional().describe("Skill to search for (partial match)."),
-      name: z.string().optional().describe("Name to search for (partial match)."),
+      query: z.string().describe("Search query to find employees (matches displayName, mail, userPrincipalName, jobTitle, department)."),
     },
     annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: BULK_EDITOR_URI } },
-  }, async ({ skill, name: nameFilter }) => {
-    let results = await db.getAllConsultants();
-
-    if (skill) {
-      results = results.filter((c) => {
-        const skills: string[] = JSON.parse(c.skills || "[]");
-        return skills.some((s) => s.toLowerCase().includes(skill.toLowerCase()));
-      });
-    }
-    if (nameFilter) {
-      results = results.filter((c) =>
-        c.name.toLowerCase().includes(nameFilter.toLowerCase())
-      );
-    }
+  }, async ({ query }) => {
+    const users = await graph.searchUsers(query);
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Found ${results.length} consultant(s) matching criteria.`,
+          text: `Found ${users.length} employee(s) matching "${query}".`,
         },
       ],
       structuredContent: {
-        consultants: results.map(parseConsultant),
+        users: users.map((u) => ({
+          id: u.id,
+          displayName: u.displayName,
+          email: u.mail || u.userPrincipalName,
+          jobTitle: u.jobTitle,
+          department: u.department,
+          officeLocation: u.officeLocation,
+          employeeType: u.employeeType,
+          employeeId: u.employeeId,
+        })),
       },
     };
   });
 
-  // show-bulk-editor
-  registerAppTool(server, "show-bulk-editor", {
-    title: "Show Bulk Editor",
+  // list-employees
+  registerAppTool(server, "list-employees", {
+    title: "List All Employees",
     description:
-      "Open the bulk editor widget to view and edit consultant records. Accepts optional filters: skill, name — to show only matching consultants.",
+      "List all employees in the organization directory. Returns up to 200 employees with their profile information.",
     inputSchema: {
-      skill: z.string().optional().describe("Optional skill to filter consultants (partial match, case-insensitive)."),
-      name: z.string().optional().describe("Optional name to filter consultants (partial match, case-insensitive)."),
+      _: z.string().optional().describe("No parameters needed."),
     },
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: BULK_EDITOR_URI } },
-  }, async ({ skill, name: nameFilter }) => {
-    let consultants = await db.getAllConsultants();
-
-    if (skill) {
-      consultants = consultants.filter((c) => {
-        const skills: string[] = JSON.parse(c.skills || "[]");
-        return skills.some((s) => s.toLowerCase().includes(skill!.toLowerCase()));
-      });
-    }
-    if (nameFilter) {
-      consultants = consultants.filter((c) =>
-        c.name.toLowerCase().includes(nameFilter!.toLowerCase())
-      );
-    }
-
-    const filterDesc = [skill && `skill: "${skill}"`, nameFilter && `name: "${nameFilter}"`].filter(Boolean).join(", ");
+  }, async () => {
+    const users = await graph.listUsers();
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Bulk editor loaded with ${consultants.length} consultant record(s)${filterDesc ? ` (filtered by ${filterDesc})` : ""}.`,
+          text: `Found ${users.length} employee(s) in the organization.`,
         },
       ],
       structuredContent: {
-        consultants: consultants.map(parseConsultant),
+        users: users.map((u) => ({
+          id: u.id,
+          displayName: u.displayName,
+          email: u.mail || u.userPrincipalName,
+          jobTitle: u.jobTitle,
+          department: u.department,
+          officeLocation: u.officeLocation,
+          employeeType: u.employeeType,
+          employeeId: u.employeeId,
+        })),
       },
     };
   });
 
-  // show-project-details
-  registerAppTool(server, "show-project-details", {
-    title: "Show Project Details",
+  // show-org-chart
+  registerAppTool(server, "show-org-chart", {
+    title: "Show Organization Chart",
     description:
-      "Display detailed information about a specific project (by ID or name) including its assigned consultants and forecasted hours.",
+      "Display the organization hierarchy for an employee, showing their manager, direct reports, and team structure.",
     inputSchema: {
-      projectId: z.string().describe("The project ID or name (partial match, case-insensitive)."),
+      employeeId: z.string().describe("The employee ID, email, or display name (partial match, case-insensitive) to view the org chart for."),
     },
     annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: DASHBOARD_URI } },
-  }, async ({ projectId }) => {
-    const project = await db.resolveProject(projectId);
-    if (!project) {
-      return {
-        content: [{ type: "text" as const, text: `Project "${projectId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
+  }, async ({ employeeId }) => {
+    let user = await graph.getUser(employeeId);
+    if (!user) {
+      const results = await graph.searchUsers(employeeId);
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: `Employee "${employeeId}" not found.` }],
+          isError: true,
+        };
+      }
+      user = results[0];
     }
-    const resolvedProjectId = project.rowKey;
-    const assignments = await db.getAssignmentsByProject(resolvedProjectId);
-    const allConsultants = await db.getAllConsultants();
-    const consultantMap = new Map(allConsultants.map((c) => [c.rowKey, parseConsultant(c)]));
 
-    const enrichedAssignments = assignments.map((a) => ({
-      ...parseAssignment(a),
-      consultantName: consultantMap.get(a.consultantId)?.name ?? "Unknown",
-    }));
-
-    const totalBillableHours = enrichedAssignments.reduce((sum, a) => {
-      return sum + a.forecast.reduce((s: number, f: any) => s + f.hours, 0);
-    }, 0);
+    const [manager, directReports] = await Promise.all([
+      graph.getUserManager(user.id),
+      graph.getUserDirectReports(user.id),
+    ]);
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Project "${project.name}" for ${project.clientName}: ${enrichedAssignments.length} assignment(s).`,
+          text: `Org chart for ${user.displayName}: ${manager ? `Manager: ${manager.displayName}` : "No manager"} | ${directReports.length} direct report(s).`,
         },
       ],
       structuredContent: {
-        projects: [parseProject(project)],
-        assignments: enrichedAssignments,
-        consultants: allConsultants.map((c) => parseConsultant(c)),
-        summary: {
-          totalConsultants: allConsultants.length,
-          totalProjects: 1,
-          totalAssignments: enrichedAssignments.length,
-          totalBillableHours,
-        },
+        employee: user,
+        manager,
+        directReports,
       },
-    };
-  });
-
-  // ─── Data-only tools (no UI) ───────────────────────────────────
-
-  // update-consultant
-  server.tool("update-consultant", "Update a single consultant's information (name, email, phone, skills, roles). The consultant can be identified by ID or name.", {
-    consultantId: z.string().describe("The ID or name (partial match, case-insensitive) of the consultant to update."),
-    name: z.string().optional().describe("Updated name."),
-    email: z.string().optional().describe("Updated email."),
-    phone: z.string().optional().describe("Updated phone."),
-    skills: z.array(z.string()).optional().describe("Updated skills list."),
-    roles: z.array(z.string()).optional().describe("Updated roles list."),
-  }, async ({ consultantId, ...updates }) => {
-    const resolved = await db.resolveConsultant(consultantId);
-    if (!resolved) {
-      return {
-        content: [{ type: "text" as const, text: `Consultant "${consultantId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    const resolvedId = resolved.rowKey;
-    const updated = await db.updateConsultant(resolvedId, updates);
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Updated consultant ${updated!.name} (ID: ${resolvedId}).`,
-        },
-      ],
-    };
-  });
-
-  // bulk-update-consultants
-  server.tool("bulk-update-consultants", "Batch-update multiple consultant records at once. Consultants can be identified by ID or name.", {
-    consultantIds: z.array(z.string()).describe("Array of consultant IDs or names (partial match, case-insensitive) to update."),
-    name: z.string().optional().describe("New name for all."),
-    email: z.string().optional().describe("New email for all."),
-    phone: z.string().optional().describe("New phone for all."),
-    skills: z.array(z.string()).optional().describe("New skills list for all."),
-    roles: z.array(z.string()).optional().describe("New roles list for all."),
-  }, async ({ consultantIds, ...changes }) => {
-    const results: string[] = [];
-    for (const consultantIdOrName of consultantIds) {
-      const resolved = await db.resolveConsultant(consultantIdOrName);
-      if (!resolved) {
-        results.push(`✗ Consultant "${consultantIdOrName}" not found (searched by ID and name)`);
-        continue;
-      }
-      const updated = await db.updateConsultant(resolved.rowKey, changes);
-      results.push(
-        updated
-          ? `✓ Updated ${updated.name}`
-          : `✗ Consultant "${consultantIdOrName}" not found`
-      );
-    }
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Bulk update complete:\n${results.join("\n")}`,
-        },
-      ],
-    };
-  });
-
-  // assign-consultant-to-project
-  server.tool("assign-consultant-to-project", "Assign a single consultant to a project with a specified role, optional billing rate, and optional forecast hours. Both project and consultant can be identified by ID or name.", {
-    projectId: z.string().describe("The project ID or name (partial match, case-insensitive) to assign the consultant to."),
-    consultantId: z.string().describe("The consultant ID or name (partial match, case-insensitive) to assign."),
-    role: z.string().describe("The role the consultant will play on the project (e.g. Architect, Developer, Designer, Project lead)."),
-    billable: z.boolean().optional().describe("Whether the assignment is billable. Defaults to true."),
-    rate: z.number().optional().describe("Hourly rate for the consultant on this project. Defaults to 0."),
-  }, async ({ projectId, consultantId, role, billable, rate }) => {
-    const project = await db.resolveProject(projectId);
-    if (!project) {
-      return {
-        content: [{ type: "text" as const, text: `Project "${projectId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    const consultant = await db.resolveConsultant(consultantId);
-    if (!consultant) {
-      return {
-        content: [{ type: "text" as const, text: `Consultant "${consultantId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    await db.createAssignment({ projectId: project.rowKey, consultantId: consultant.rowKey, role, billable, rate });
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Assigned ${consultant.name} to project "${project.name}" as ${role}${billable === false ? " (non-billable)" : ""}${rate ? ` at $${rate}/hr` : ""}.`,
-        },
-      ],
-    };
-  });
-
-  // bulk-assign-consultants
-  server.tool("bulk-assign-consultants", "Assign multiple consultants to a project at once. Each assignment includes a role, optional billing rate, and optional forecast. Project and consultants can be identified by ID or name.", {
-    projectId: z.string().describe("The project ID or name (partial match, case-insensitive) to assign consultants to."),
-    consultantIds: z.array(z.string()).describe("Array of consultant IDs or names (partial match, case-insensitive) to assign."),
-    role: z.string().describe("The role for all assigned consultants."),
-    billable: z.boolean().optional().describe("Whether the assignments are billable. Defaults to true."),
-    rate: z.number().optional().describe("Hourly rate for all assigned consultants. Defaults to 0."),
-  }, async ({ projectId, consultantIds, role, billable, rate }) => {
-    const project = await db.resolveProject(projectId);
-    if (!project) {
-      return {
-        content: [{ type: "text" as const, text: `Project "${projectId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    const resolvedProjectId = project.rowKey;
-    const results: string[] = [];
-    for (const consultantIdOrName of consultantIds) {
-      const consultant = await db.resolveConsultant(consultantIdOrName);
-      if (!consultant) {
-        results.push(`✗ Consultant "${consultantIdOrName}" not found (searched by ID and name)`);
-        continue;
-      }
-      await db.createAssignment({ projectId: resolvedProjectId, consultantId: consultant.rowKey, role, billable, rate });
-      results.push(`✓ Assigned ${consultant.name} as ${role}`);
-    }
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Bulk assignment to "${project.name}" complete:\n${results.join("\n")}`,
-        },
-      ],
-    };
-  });
-
-  // remove-assignment
-  server.tool("remove-assignment", "Remove a consultant's assignment from a project. Both project and consultant can be identified by ID or name.", {
-    projectId: z.string().describe("The project ID or name (partial match, case-insensitive)."),
-    consultantId: z.string().describe("The consultant ID or name (partial match, case-insensitive) to remove from the project."),
-  }, async ({ projectId, consultantId }) => {
-    const project = await db.resolveProject(projectId);
-    if (!project) {
-      return {
-        content: [{ type: "text" as const, text: `Project "${projectId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    const consultant = await db.resolveConsultant(consultantId);
-    if (!consultant) {
-      return {
-        content: [{ type: "text" as const, text: `Consultant "${consultantId}" not found (searched by ID and name).` }],
-        isError: true,
-      };
-    }
-    const removed = await db.deleteAssignment(project.rowKey, consultant.rowKey);
-    if (!removed) {
-      return {
-        content: [{ type: "text" as const, text: `Assignment for consultant ${consultant.name} on project ${project.name} not found.` }],
-        isError: true,
-      };
-    }
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Removed assignment: ${consultant.name} from project "${project.name}".`,
-        },
-      ],
     };
   });
 
